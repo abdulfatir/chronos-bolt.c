@@ -1,0 +1,6 @@
+torch~=2.6.0
+numpy~=2.2.0
+chronos-forecasting~=1.5.0
+typer~=0.15.2
+pandas~=2.2.3
+rich~=14.0
