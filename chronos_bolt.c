@@ -86,6 +86,14 @@ typedef struct {
 } RunState;
 
 typedef struct {
+    float *query;    // Buffer for query (q_len, n_heads, d_kv)
+    float *key;      // Buffer for key (kv_len, n_heads, d_kv)
+    float *value;    // Buffer for value (kv_len, n_heads, d_kv)
+    float *score;     // Buffer for scores (q_len, n_heads, kv_len)
+    float *attn_out; // Buffer for attention output (q_len, n_heads, d_kv)
+} AttentionState;
+
+typedef struct {
     ChronosBoltConfig config;
     ChronosBoltWeights ws;
     RunState run_state;
@@ -408,6 +416,31 @@ void free_run_state(RunState *run_state) {
     free(run_state->dec_pos_bias);
 }
 
+void malloc_attn_state(int q_len, int kv_len, AttentionState *attn_state, ChronosBoltConfig *config) {
+    const int d_kv = config->d_kv;
+    const int n_heads = config->n_heads;
+
+    attn_state->query = (float *)malloc(q_len * n_heads * d_kv * sizeof(float));
+    attn_state->key = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
+    attn_state->value = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
+    attn_state->score = (float *)malloc(q_len * n_heads * kv_len * sizeof(float));
+    attn_state->attn_out = (float *)calloc(q_len * n_heads * d_kv, sizeof(float));
+
+    if (attn_state->query == NULL || attn_state->key == NULL || attn_state->value == NULL ||
+        attn_state->score == NULL || attn_state->attn_out == NULL) {
+        fprintf(stderr, "Error: could not allocate memory for attention state\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
+void free_attn_state(AttentionState *attn_state) {
+    free(attn_state->query);
+    free(attn_state->key);
+    free(attn_state->value);
+    free(attn_state->score);
+    free(attn_state->attn_out);
+}
+
 // Ops
 
 void add(float *out, float *x, float *y, int d) {
@@ -416,7 +449,7 @@ void add(float *out, float *x, float *y, int d) {
     // y: (d,)
     // out: (d,) = x + y
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < d; i++) {
         out[i] = x[i] + y[i];
     }
@@ -428,7 +461,7 @@ void matmul(float *out, float *w, float *x, int d, int n) {
     // x: (n,)
     // out: (d,) = w @ x
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < d; i++) {
         float tmp = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -442,7 +475,7 @@ void batched_matmul(float *out, float *w, float *x, int d, int n, int m) {
     // Batched version of rms_norm above
     // m: batch size
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < m; i++) {
         matmul(out + i * d, w, x + i * n, d, n);
     }
@@ -455,7 +488,7 @@ void matmul_with_bias(float *out, float *w, float *b, float *x, int d, int n) {
     // x: (n,)
     // out: (d,) = w @ x + b
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < d; i++) {
         float tmp = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -473,7 +506,7 @@ void rmsnorm(float *out, float *x, float *weight, int d, float eps) {
 
     float ss = 0.0f;
 
-    #pragma omp parallel for reduction(+ : ss)
+#pragma omp parallel for reduction(+ : ss)
     for (int j = 0; j < d; j++) {
         ss += x[j] * x[j];
     }
@@ -481,7 +514,7 @@ void rmsnorm(float *out, float *x, float *weight, int d, float eps) {
     ss += eps;
     ss = 1.0f / sqrtf(ss);
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int j = 0; j < d; j++) {
         out[j] = x[j] * ss * weight[j];
     }
@@ -491,7 +524,7 @@ void batched_rmsnorm(float *out, float *x, float *weight, int d, int n, float ep
     // Batched version of rms_norm above
     // n: batch size
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < n; i++) {
         rmsnorm(out + i * d, x + i * d, weight, d, eps);
     }
@@ -504,7 +537,7 @@ void softmax(float *x, int d) {
 
     float max_val = -FLT_MAX;
 
-    #pragma omp parallel for reduction(max : max_val)
+#pragma omp parallel for reduction(max : max_val)
     for (int i = 0; i < d; i++) {
         if (x[i] > max_val) {
             max_val = x[i];
@@ -512,13 +545,13 @@ void softmax(float *x, int d) {
     }
 
     float sum = 0.0f;
-    #pragma omp parallel for reduction(+ : sum)
+#pragma omp parallel for reduction(+ : sum)
     for (int i = 0; i < d; i++) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < d; i++) {
         x[i] /= sum;
     }
@@ -572,7 +605,7 @@ void t5_relative_pos_bias(float *out, float *pos_bias_w, int q_len, int kv_len, 
 }
 
 void multi_head_attention(float *out, float *memory, float *state, float *bias, float *wq, float *wk, float *wv,
-                          float *wo, int q_len, int kv_len, ChronosBoltConfig *config) {
+                          float *wo, int q_len, int kv_len, AttentionState *attn_state, ChronosBoltConfig *config) {
     // Multi-head attention
     // memory: (kv_len, d_model) the attented-to states, same as `state` for self-attention
     // state: (q_len, d_model) the attending states
@@ -587,58 +620,52 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
     int d_kv = config->d_kv;
     int n_heads = config->n_heads;
 
-    float *query = (float *)malloc(q_len * n_heads * d_kv * sizeof(float));
-    float *key = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
-    float *value = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
-    float *attn = (float *)malloc(q_len * n_heads * kv_len * sizeof(float));
-    float *attn_out = (float *)calloc(q_len * n_heads * d_kv, sizeof(float));
+    float *query = attn_state->query;
+    float *key = attn_state->key;
+    float *value = attn_state->value;
+    float *score = attn_state->score;
+    float *attn_out = attn_state->attn_out;
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int t = 0; t < q_len; t++) {
         matmul(query + t * n_heads * d_kv, wq, state + t * d_model, n_heads * d_kv, d_model);
     }
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int t = 0; t < kv_len; t++) {
         matmul(key + t * n_heads * d_kv, wk, memory + t * d_model, n_heads * d_kv, d_model);
         matmul(value + t * n_heads * d_kv, wv, memory + t * d_model, n_heads * d_kv, d_model);
     }
-    #pragma omp parallel for collapse(3)
+#pragma omp parallel for collapse(3)
     for (int t = 0; t < q_len; t++) {
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < kv_len; i++) {
-                matmul(attn + t * n_heads * kv_len + h * kv_len + i, query + t * n_heads * d_kv + h * d_kv,
+                matmul(score + t * n_heads * kv_len + h * kv_len + i, query + t * n_heads * d_kv + h * d_kv,
                        key + i * n_heads * d_kv + h * d_kv, 1, d_kv);
             }
         }
     }
     if (bias != NULL) {
-        add(attn, attn, bias, q_len * n_heads * kv_len);
+        add(score, score, bias, q_len * n_heads * kv_len);
     }
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < q_len * n_heads; i++) {
-        softmax(attn + i * kv_len, kv_len);
+        softmax(score + i * kv_len, kv_len);
     }
-    #pragma omp parallel for collapse(2)
+#pragma omp parallel for collapse(2)
     for (int i = 0; i < q_len; i++) {
         for (int j = 0; j < n_heads; j++) {
             for (int k = 0; k < kv_len; k++) {
                 for (int l = 0; l < d_kv; l++) {
                     attn_out[i * n_heads * d_kv + j * d_kv + l] +=
-                        attn[i * n_heads * kv_len + j * kv_len + k] * value[k * n_heads * d_kv + j * d_kv + l];
+                    score[i * n_heads * kv_len + j * kv_len + k] * value[k * n_heads * d_kv + j * d_kv + l];
                 }
             }
         }
     }
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < q_len; i++) {
         matmul(out + i * d_model, wo, attn_out + i * n_heads * d_kv, d_model, n_heads * d_kv);
     }
-
-    free(query);
-    free(key);
-    free(value);
-    free(attn);
-    free(attn_out);
 }
 
 void instance_norm(float *x, int size, float *loc, float *scale) {
@@ -647,13 +674,13 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
     float mean = 0.0f;
     float std = 0.0f;
 
-    #pragma omp parallel for reduction(+ : mean)
+#pragma omp parallel for reduction(+ : mean)
     for (int i = 0; i < size; i++) {
         mean += x[i];
     }
     mean /= size;
 
-    #pragma omp parallel for reduction(+ : std)
+#pragma omp parallel for reduction(+ : std)
     for (int i = 0; i < size; i++) {
         std += (x[i] - mean) * (x[i] - mean);
     }
@@ -663,7 +690,7 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
         std = 1e-5;
     }
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = (x[i] - mean) / std;
     }
@@ -675,7 +702,7 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
 void instance_denorm(float *x, int size, float loc, float scale) {
     // Un-scaling
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = x[i] * scale + loc;
     }
@@ -684,7 +711,7 @@ void instance_denorm(float *x, int size, float loc, float scale) {
 void relu(float *x, int size) {
     // Element-wise ReLU
 
-    #pragma omp parallel for
+#pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = fmaxf(x[i], 0.0f);
     }
@@ -792,7 +819,9 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
 
     t5_relative_pos_bias(rs->enc_pos_bias, chronos_bolt->ws.encoder_rel_pos_bias, num_patches + 1, num_patches + 1,
                          true, &chronos_bolt->config);
-
+    // Allocate buffers for MHA
+    AttentionState *enc_attn_state = malloc(sizeof(AttentionState));
+    malloc_attn_state(num_patches + 1, num_patches + 1, enc_attn_state, &chronos_bolt->config);
     // Loop over encoder layers
     for (int l = 0; l < chronos_bolt->config.n_encoder_layers; l++) {
         // RMS Norm
@@ -804,7 +833,7 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
                              chronos_bolt->ws.encoder_self_attn_k + l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.encoder_self_attn_v + l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.encoder_self_attn_o + l * d_model * n_heads * d_kv, num_patches + 1,
-                             num_patches + 1, &chronos_bolt->config);
+                             num_patches + 1, enc_attn_state, &chronos_bolt->config);
         // Residual Connection
         add(rs->embeds, rs->embeds, rs->buf_d, (num_patches + 1) * d_model);
         // FF RMS Norm
@@ -824,11 +853,18 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
     batched_rmsnorm(rs->embeds, rs->embeds, chronos_bolt->ws.encoder_final_ln, d_model, num_patches + 1,
                     layer_norm_eps);
 
+    free_attn_state(enc_attn_state);
+    free(enc_attn_state);
+
     // Decoder
     memcpy(rs->dec_embeds, chronos_bolt->ws.spl_tokens, d_model * sizeof(float));
 
     t5_relative_pos_bias(rs->dec_pos_bias, chronos_bolt->ws.decoder_rel_pos_bias, 1, 1, false, &chronos_bolt->config);
-
+    // Allocate buffers for MHA
+    AttentionState *dec_self_attn_state = malloc(sizeof(AttentionState));
+    malloc_attn_state(1, 1, dec_self_attn_state, &chronos_bolt->config);
+    AttentionState *dec_cross_attn_state = malloc(sizeof(AttentionState));
+    malloc_attn_state(1, num_patches + 1, dec_cross_attn_state, &chronos_bolt->config);
     // Loop over decoder layers
     for (int l = 0; l < chronos_bolt->config.n_decoder_layers; l++) {
         // Self-Attention
@@ -841,7 +877,7 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
                              chronos_bolt->ws.decoder_self_attn_k + +l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.decoder_self_attn_v + l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.decoder_self_attn_o + l * d_model * n_heads * d_kv, 1, 1,
-                             &chronos_bolt->config);
+                             dec_self_attn_state, &chronos_bolt->config);
         // Residual Connection
         add(rs->dec_embeds, rs->dec_embeds, rs->dec_buf_d, d_model);
 
@@ -855,7 +891,7 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
                              chronos_bolt->ws.decoder_cross_attn_k + l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.decoder_cross_attn_v + l * n_heads * d_kv * d_model,
                              chronos_bolt->ws.decoder_cross_attn_o + l * d_model * n_heads * d_kv, 1, num_patches + 1,
-                             &chronos_bolt->config);
+                             dec_cross_attn_state, &chronos_bolt->config);
         // Residual Connection
         add(rs->dec_embeds, rs->dec_embeds, rs->dec_buf_d, d_model);
         // FF RMS Norm
@@ -872,6 +908,11 @@ void predict(ChronosBolt *chronos_bolt, TimeSeries *ts, float *forecast) {
     }
 
     batched_rmsnorm(rs->dec_embeds, rs->dec_embeds, chronos_bolt->ws.decoder_final_ln, d_model, 1, layer_norm_eps);
+
+    free_attn_state(dec_self_attn_state);
+    free_attn_state(dec_cross_attn_state);
+    free(dec_self_attn_state);
+    free(dec_cross_attn_state);
 
     patch_embedding(rs->dec_embeds, forecast, chronos_bolt->ws.out_patch_emb_hid_w,
                     chronos_bolt->ws.out_patch_emb_hid_b, chronos_bolt->ws.out_patch_emb_out_w,
