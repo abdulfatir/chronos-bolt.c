@@ -17,6 +17,9 @@ uv pip install -r requirements.txt
 
 ### Building and running the C version
 
+> [!IMPORTANT]
+> The following instructions should technically work on both Linux and MacOS. However, MacOS annoyingly contains `/usr/bin/gcc` which is actually `clang` and runs when you run `gcc`. To actually use GCC, you need to [install `gcc` through Homebrew](https://formulae.brew.sh/formula/gcc) which should be as straightforward as `brew install gcc`, if you have Homebrew installed. Homebrew installs the correct GCC with a version suffix (e.g., `gcc-14`), so you need to update the first line in the `Makefile` to `CC = gcc-14` instead.
+
 - Export the model checkpoint in a custom binary format used by `chronos_bolt.c`. The following command will generate `autogluon-chronos-bolt-small.bin`.
 ```sh
 python export.py hf2bin --model-name autogluon/chronos-bolt-small
