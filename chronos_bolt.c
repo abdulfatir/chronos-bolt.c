@@ -89,7 +89,7 @@ typedef struct {
     float *query;    // Buffer for query (q_len, n_heads, d_kv)
     float *key;      // Buffer for key (kv_len, n_heads, d_kv)
     float *value;    // Buffer for value (kv_len, n_heads, d_kv)
-    float *score;     // Buffer for scores (q_len, n_heads, kv_len)
+    float *score;    // Buffer for scores (q_len, n_heads, kv_len)
     float *attn_out; // Buffer for attention output (q_len, n_heads, d_kv)
 } AttentionState;
 
@@ -424,7 +424,7 @@ void malloc_attn_state(int q_len, int kv_len, AttentionState *attn_state, Chrono
     attn_state->key = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
     attn_state->value = (float *)malloc(kv_len * n_heads * d_kv * sizeof(float));
     attn_state->score = (float *)malloc(q_len * n_heads * kv_len * sizeof(float));
-    attn_state->attn_out = (float *)calloc(q_len * n_heads * d_kv, sizeof(float));
+    attn_state->attn_out = (float *)malloc(q_len * n_heads * d_kv * sizeof(float));
 
     if (attn_state->query == NULL || attn_state->key == NULL || attn_state->value == NULL ||
         attn_state->score == NULL || attn_state->attn_out == NULL) {
@@ -626,6 +626,8 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
     float *score = attn_state->score;
     float *attn_out = attn_state->attn_out;
 
+    memset(attn_out, 0, (size_t)q_len * n_heads * d_kv * sizeof(float));
+
 #pragma omp parallel for
     for (int t = 0; t < q_len; t++) {
         matmul(query + t * n_heads * d_kv, wq, state + t * d_model, n_heads * d_kv, d_model);
@@ -635,7 +637,7 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
         matmul(key + t * n_heads * d_kv, wk, memory + t * d_model, n_heads * d_kv, d_model);
         matmul(value + t * n_heads * d_kv, wv, memory + t * d_model, n_heads * d_kv, d_model);
     }
-#pragma omp parallel for collapse(3)
+#pragma omp parallel for collapse(2)
     for (int t = 0; t < q_len; t++) {
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < kv_len; i++) {
@@ -657,7 +659,7 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
             for (int k = 0; k < kv_len; k++) {
                 for (int l = 0; l < d_kv; l++) {
                     attn_out[i * n_heads * d_kv + j * d_kv + l] +=
-                    score[i * n_heads * kv_len + j * kv_len + k] * value[k * n_heads * d_kv + j * d_kv + l];
+                        score[i * n_heads * kv_len + j * kv_len + k] * value[k * n_heads * d_kv + j * d_kv + l];
                 }
             }
         }
