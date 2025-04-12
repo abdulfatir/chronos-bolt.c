@@ -16,7 +16,7 @@ jobs:
       with:
         python-version: 3.11
     - name: Install dependencies
-      run: pip install -r requirements.txt
+      run: pip install -r requirements.txt -f https://download.pytorch.org/whl/cpu/torch_stable.html
     - name: Export model into binary format
       run: python export.py hf2bin --model-name autogluon/chronos-bolt-tiny
     - name: Build C version
