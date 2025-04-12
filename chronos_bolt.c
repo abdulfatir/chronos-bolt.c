@@ -449,7 +449,7 @@ void add(float *out, float *x, float *y, int d) {
     // y: (d,)
     // out: (d,) = x + y
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < d; i++) {
         out[i] = x[i] + y[i];
     }
@@ -461,7 +461,7 @@ void matmul(float *out, float *w, float *x, int d, int n) {
     // x: (n,)
     // out: (d,) = w @ x
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < d; i++) {
         float tmp = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -475,7 +475,7 @@ void batched_matmul(float *out, float *w, float *x, int d, int n, int m) {
     // Batched version of rms_norm above
     // m: batch size
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < m; i++) {
         matmul(out + i * d, w, x + i * n, d, n);
     }
@@ -488,7 +488,7 @@ void matmul_with_bias(float *out, float *w, float *b, float *x, int d, int n) {
     // x: (n,)
     // out: (d,) = w @ x + b
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < d; i++) {
         float tmp = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -506,7 +506,7 @@ void rmsnorm(float *out, float *x, float *weight, int d, float eps) {
 
     float ss = 0.0f;
 
-#pragma omp parallel for reduction(+ : ss)
+    #pragma omp parallel for reduction(+ : ss)
     for (int j = 0; j < d; j++) {
         ss += x[j] * x[j];
     }
@@ -514,7 +514,7 @@ void rmsnorm(float *out, float *x, float *weight, int d, float eps) {
     ss += eps;
     ss = 1.0f / sqrtf(ss);
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int j = 0; j < d; j++) {
         out[j] = x[j] * ss * weight[j];
     }
@@ -524,7 +524,7 @@ void batched_rmsnorm(float *out, float *x, float *weight, int d, int n, float ep
     // Batched version of rms_norm above
     // n: batch size
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < n; i++) {
         rmsnorm(out + i * d, x + i * d, weight, d, eps);
     }
@@ -537,7 +537,7 @@ void softmax(float *x, int d) {
 
     float max_val = -FLT_MAX;
 
-#pragma omp parallel for reduction(max : max_val)
+    #pragma omp parallel for reduction(max : max_val)
     for (int i = 0; i < d; i++) {
         if (x[i] > max_val) {
             max_val = x[i];
@@ -545,13 +545,13 @@ void softmax(float *x, int d) {
     }
 
     float sum = 0.0f;
-#pragma omp parallel for reduction(+ : sum)
+    #pragma omp parallel for reduction(+ : sum)
     for (int i = 0; i < d; i++) {
         x[i] = expf(x[i] - max_val);
         sum += x[i];
     }
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < d; i++) {
         x[i] /= sum;
     }
@@ -628,16 +628,16 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
 
     memset(attn_out, 0, (size_t)q_len * n_heads * d_kv * sizeof(float));
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int t = 0; t < q_len; t++) {
         matmul(query + t * n_heads * d_kv, wq, state + t * d_model, n_heads * d_kv, d_model);
     }
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int t = 0; t < kv_len; t++) {
         matmul(key + t * n_heads * d_kv, wk, memory + t * d_model, n_heads * d_kv, d_model);
         matmul(value + t * n_heads * d_kv, wv, memory + t * d_model, n_heads * d_kv, d_model);
     }
-#pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2)
     for (int t = 0; t < q_len; t++) {
         for (int h = 0; h < n_heads; h++) {
             for (int i = 0; i < kv_len; i++) {
@@ -649,11 +649,11 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
     if (bias != NULL) {
         add(score, score, bias, q_len * n_heads * kv_len);
     }
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < q_len * n_heads; i++) {
         softmax(score + i * kv_len, kv_len);
     }
-#pragma omp parallel for collapse(2)
+    #pragma omp parallel for collapse(2)
     for (int i = 0; i < q_len; i++) {
         for (int j = 0; j < n_heads; j++) {
             for (int k = 0; k < kv_len; k++) {
@@ -664,7 +664,7 @@ void multi_head_attention(float *out, float *memory, float *state, float *bias, 
             }
         }
     }
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < q_len; i++) {
         matmul(out + i * d_model, wo, attn_out + i * n_heads * d_kv, d_model, n_heads * d_kv);
     }
@@ -676,13 +676,13 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
     float mean = 0.0f;
     float std = 0.0f;
 
-#pragma omp parallel for reduction(+ : mean)
+    #pragma omp parallel for reduction(+ : mean)
     for (int i = 0; i < size; i++) {
         mean += x[i];
     }
     mean /= size;
 
-#pragma omp parallel for reduction(+ : std)
+    #pragma omp parallel for reduction(+ : std)
     for (int i = 0; i < size; i++) {
         std += (x[i] - mean) * (x[i] - mean);
     }
@@ -692,7 +692,7 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
         std = 1e-5;
     }
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = (x[i] - mean) / std;
     }
@@ -704,7 +704,7 @@ void instance_norm(float *x, int size, float *loc, float *scale) {
 void instance_denorm(float *x, int size, float loc, float scale) {
     // Un-scaling
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = x[i] * scale + loc;
     }
@@ -713,7 +713,7 @@ void instance_denorm(float *x, int size, float loc, float scale) {
 void relu(float *x, int size) {
     // Element-wise ReLU
 
-#pragma omp parallel for
+    #pragma omp parallel for
     for (int i = 0; i < size; i++) {
         x[i] = fmaxf(x[i], 0.0f);
     }
