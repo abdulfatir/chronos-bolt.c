@@ -25,3 +25,19 @@ jobs:
       run: ./chronos_bolt autogluon-chronos-bolt-tiny.bin data.csv forecast-c.csv
     - name: Print contents of output file
       run: cat forecast-c.csv
+  run-py-version:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.11
+    - name: Install dependencies
+      run: pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    - name: Export model into torch format
+      run: python export.py hf2pt --model-name autogluon/chronos-bolt-tiny
+    - name: Run torch version
+      run: python chronos_bolt.py autogluon-chronos-bolt-tiny.pt data.csv forecast-pt.csv
+    - name: Print contents of output file
+      run: cat forecast-pt.csv
