@@ -44,23 +44,6 @@ class LayerNorm(nn.Module):
         return self.weight * hidden_states
 
 
-class DenseActDense(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, dropout_rate: float):
-        super().__init__()
-
-        self.wi = nn.Linear(d_model, d_ff, bias=False)
-        self.wo = nn.Linear(d_ff, d_model, bias=False)
-        self.dropout = nn.Dropout(dropout_rate)
-        self.act = nn.ReLU()
-
-    def forward(self, hidden_states):
-        hidden_states = self.wi(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.dropout(hidden_states)
-        hidden_states = self.wo(hidden_states)
-        return hidden_states
-
-
 class FeedForward(nn.Module):
     def __init__(self, cfg: ChronosBoltConfig):
         super().__init__()
